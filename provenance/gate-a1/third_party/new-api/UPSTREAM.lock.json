@@ -1,0 +1,19 @@
+{
+  "upstream": {
+    "repository": "https://github.com/QuantumNous/new-api",
+    "tag": "v1.0.0-rc.19-i18nfix.2",
+    "tagObject": "a5223fdd0081ffca529d6804ead81aa5c7052a8c",
+    "commit": "becc18e3007e9812a7bb2dcfebefc6c19ad3f102",
+    "license": "AGPL-3.0-only"
+  },
+  "officialImage": {
+    "repository": "docker.io/calciumion/new-api",
+    "ociIndexDigest": "sha256:ebf9066d8aae0d1efe41434692c3bcfeffa3be997b343b93adc16e170647de2b",
+    "linuxAmd64ManifestDigest": "sha256:1670bcca4562f4af159cef776c3c62fdab8caf21ee5a0502e07dd5e7807a8ee1",
+    "attestationManifestDigest": "sha256:fb514473bbcedc28508b9be7cccf04801b932d1a6327c0b8ca2edb1ae76e9dc0"
+  },
+  "patch": {
+    "path": "third_party/new-api/patches/0001-persist-tc-request-id.patch",
+    "sha256": "958def972aa44d997ea71f133270247c0cd8620b33ba9d68827dfcd674a779a2"
+  }
+}

@@ -1,0 +1,259 @@
+diff --git a/common/constants.go b/common/constants.go
+index 87d212f99732709394ea474ff92982b3ea909ca5..652c0e0e691e04c55571f934875a796feaa5b245 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -195,8 +195,11 @@ var GeminiSafetySetting string
+ var CohereSafetySetting string
+ 
+ const (
+-	RequestIdKey         = "X-Oneapi-Request-Id"
+-	UpstreamRequestIdKey = "X-Upstream-Request-Id"
++	RequestIdKey              = "X-Oneapi-Request-Id"
++	UpstreamRequestIdKey      = "X-Upstream-Request-Id"
++	TokenCraftRequestIdKey    = "X-TC-Request-Id"
++	TokenCraftTraceIdKey      = "X-TC-Trace-Id"
++	TokenCraftRequestStateKey = "tc_request_id_state"
+ )
+ 
+ const (
+diff --git a/middleware/request-id.go b/middleware/request-id.go
+index e1bf315a45e0ee409318275c7f3290d938a7b04e..bf14994145189d0f94de7326efb67841ed3ff481 100644
+--- a/middleware/request-id.go
++++ b/middleware/request-id.go
+@@ -2,13 +2,35 @@ package middleware
+ 
+ import (
+ 	"context"
++	"regexp"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/gin-gonic/gin"
+ )
+ 
++var tokenCraftRequestIDPattern = regexp.MustCompile(`^tc_req_[A-Za-z0-9_-]{1,56}$`)
++
++func captureTokenCraftRequestID(c *gin.Context) {
++	requestID := c.GetHeader(common.TokenCraftRequestIdKey)
++	traceID := c.GetHeader(common.TokenCraftTraceIdKey)
++	state := "missing"
++	if requestID != "" {
++		switch {
++		case !tokenCraftRequestIDPattern.MatchString(requestID):
++			state = "invalid"
++		case traceID != "" && traceID != requestID:
++			state = "conflict"
++		default:
++			state = "captured"
++			c.Set(common.TokenCraftRequestIdKey, requestID)
++		}
++	}
++	c.Set(common.TokenCraftRequestStateKey, state)
++}
++
+ func RequestId() func(c *gin.Context) {
+ 	return func(c *gin.Context) {
++		captureTokenCraftRequestID(c)
+ 		id := common.NewRequestId()
+ 		c.Set(common.RequestIdKey, id)
+ 		ctx := context.WithValue(c.Request.Context(), common.RequestIdKey, id)
+diff --git a/middleware/request_id_tc_test.go b/middleware/request_id_tc_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1cf1d4b6d26c633a1d3a284f338bf55c2a94839
+--- /dev/null
++++ b/middleware/request_id_tc_test.go
+@@ -0,0 +1,34 @@
++package middleware
++
++import (
++	"net/http/httptest"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestRequestIDCapturesTokenCraftIdentityState(t *testing.T) {
++	cases := []struct {
++		name, requestID, traceID, wantState, wantID string
++	}{
++		{"captured", "tc_req_direct_1", "tc_req_direct_1", "captured", "tc_req_direct_1"},
++		{"missing", "", "", "missing", ""},
++		{"invalid", "caller-controlled", "caller-controlled", "invalid", ""},
++		{"conflict", "tc_req_direct_1", "tc_req_other", "conflict", ""},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			gin.SetMode(gin.TestMode)
++			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++			ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
++			ctx.Request.Header.Set(common.TokenCraftRequestIdKey, tc.requestID)
++			ctx.Request.Header.Set(common.TokenCraftTraceIdKey, tc.traceID)
++			RequestId()(ctx)
++			assert.Equal(t, tc.wantState, ctx.GetString(common.TokenCraftRequestStateKey))
++			assert.Equal(t, tc.wantID, ctx.GetString(common.TokenCraftRequestIdKey))
++			assert.NotEmpty(t, ctx.GetString(common.RequestIdKey))
++		})
++	}
++}
+diff --git a/model/clickhouse_log_test.go b/model/clickhouse_log_test.go
+index d9737e6b226dad6907e0ccedd113d097fc99e4b5..d935003fe726d71ecfd99a2883784ef1eab2e64e 100644
+--- a/model/clickhouse_log_test.go
++++ b/model/clickhouse_log_test.go
+@@ -83,6 +83,8 @@ func TestClickHouseLogCreateTableSQL(t *testing.T) {
+ 	assert.Contains(t, withoutTTL, "ENGINE = MergeTree()")
+ 	assert.Contains(t, withoutTTL, "PARTITION BY toYYYYMM(toDateTime(created_at))")
+ 	assert.Contains(t, withoutTTL, "ORDER BY (created_at, request_id)")
++	assert.Contains(t, withoutTTL, "tc_request_id Nullable(String)")
++	assert.Contains(t, withoutTTL, "tc_request_id_state String DEFAULT 'missing'")
+ 	assert.NotContains(t, withoutTTL, "TTL ")
+ 
+ 	withTTL := clickHouseLogCreateTableSQL(30)
+diff --git a/model/log.go b/model/log.go
+index 506bd504b68687714e1eefed70c45b1264fe6f88..fccbf8cd1d4f00c40ee1619f955a252c820d8e1b 100644
+--- a/model/log.go
++++ b/model/log.go
+@@ -57,27 +57,29 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
+ }
+ 
+ type Log struct {
+-	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
+-	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
+-	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
+-	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
+-	Content           string `json:"content"`
+-	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
+-	TokenName         string `json:"token_name" gorm:"index;default:''"`
+-	ModelName         string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
+-	Quota             int    `json:"quota" gorm:"default:0"`
+-	PromptTokens      int    `json:"prompt_tokens" gorm:"default:0"`
+-	CompletionTokens  int    `json:"completion_tokens" gorm:"default:0"`
+-	UseTime           int    `json:"use_time" gorm:"default:0"`
+-	IsStream          bool   `json:"is_stream"`
+-	ChannelId         int    `json:"channel" gorm:"index"`
+-	ChannelName       string `json:"channel_name" gorm:"->"`
+-	TokenId           int    `json:"token_id" gorm:"default:0;index"`
+-	Group             string `json:"group" gorm:"index"`
+-	Ip                string `json:"ip" gorm:"index;default:''"`
+-	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
+-	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
+-	Other             string `json:"other"`
++	Id                int     `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
++	UserId            int     `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
++	CreatedAt         int64   `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
++	Type              int     `json:"type" gorm:"index:idx_created_at_type"`
++	Content           string  `json:"content"`
++	Username          string  `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
++	TokenName         string  `json:"token_name" gorm:"index;default:''"`
++	ModelName         string  `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
++	Quota             int     `json:"quota" gorm:"default:0"`
++	PromptTokens      int     `json:"prompt_tokens" gorm:"default:0"`
++	CompletionTokens  int     `json:"completion_tokens" gorm:"default:0"`
++	UseTime           int     `json:"use_time" gorm:"default:0"`
++	IsStream          bool    `json:"is_stream"`
++	ChannelId         int     `json:"channel" gorm:"index"`
++	ChannelName       string  `json:"channel_name" gorm:"->"`
++	TokenId           int     `json:"token_id" gorm:"default:0;index"`
++	Group             string  `json:"group" gorm:"index"`
++	Ip                string  `json:"ip" gorm:"index;default:''"`
++	RequestId         string  `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
++	UpstreamRequestId string  `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
++	TcRequestId       *string `json:"tc_request_id,omitempty" gorm:"type:varchar(72);index:idx_logs_tc_request_id"`
++	TcRequestIdState  string  `json:"tc_request_id_state" gorm:"type:varchar(16);not null;default:'missing';index:idx_logs_tc_request_id_state"`
++	Other             string  `json:"other"`
+ }
+ 
+ // don't use iota, avoid change log type value
+@@ -348,6 +350,11 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
+ 	username := c.GetString("username")
+ 	requestId := c.GetString(common.RequestIdKey)
+ 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
++	tcRequestId := c.GetString(common.TokenCraftRequestIdKey)
++	tcRequestIdState := c.GetString(common.TokenCraftRequestStateKey)
++	if tcRequestIdState == "" {
++		tcRequestIdState = "missing"
++	}
+ 	createdAt := common.GetTimestamp()
+ 	otherStr := common.MapToJsonStr(params.Other)
+ 	// 判断是否需要记录 IP
+@@ -381,7 +388,14 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
+ 		}(),
+ 		RequestId:         requestId,
+ 		UpstreamRequestId: upstreamRequestId,
+-		Other:             otherStr,
++		TcRequestId: func() *string {
++			if tcRequestIdState != "captured" {
++				return nil
++			}
++			return &tcRequestId
++		}(),
++		TcRequestIdState: tcRequestIdState,
++		Other:            otherStr,
+ 	}
+ 	err := createLog(log)
+ 	if err != nil {
+diff --git a/model/log_tc_request_id_test.go b/model/log_tc_request_id_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..990b3932d07b62cd0746a31b7aba4848a7e74f72
+--- /dev/null
++++ b/model/log_tc_request_id_test.go
+@@ -0,0 +1,33 @@
++package model
++
++import (
++	"testing"
++
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func TestLogPersistsTokenCraftRequestFields(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++	require.NoError(t, err)
++	require.NoError(t, db.AutoMigrate(&Log{}))
++
++	captured := "tc_req_durable_1"
++	require.NoError(t, db.Create(&Log{Type: LogTypeConsume, TcRequestId: &captured, TcRequestIdState: "captured"}).Error)
++	require.NoError(t, db.Create(&Log{Type: LogTypeConsume, TcRequestIdState: "missing"}).Error)
++	require.NoError(t, db.Create(&Log{Type: LogTypeConsume, TcRequestIdState: "invalid"}).Error)
++	require.NoError(t, db.Create(&Log{Type: LogTypeConsume, TcRequestIdState: "conflict"}).Error)
++
++	var logs []Log
++	require.NoError(t, db.Order("id").Find(&logs).Error)
++	require.Len(t, logs, 4)
++	assert.Equal(t, "captured", logs[0].TcRequestIdState)
++	require.NotNil(t, logs[0].TcRequestId)
++	assert.Equal(t, captured, *logs[0].TcRequestId)
++	for _, log := range logs[1:] {
++		assert.Nil(t, log.TcRequestId)
++	}
++	assert.Equal(t, []string{"missing", "invalid", "conflict"}, []string{logs[1].TcRequestIdState, logs[2].TcRequestIdState, logs[3].TcRequestIdState})
++}
+diff --git a/model/main.go b/model/main.go
+index 76f98a59c3078a1e5830cb5d764e16240b2f0106..1ce88ea67c473e0c7fdd49e76c7b898d3b04a99e 100644
+--- a/model/main.go
++++ b/model/main.go
+@@ -400,6 +400,12 @@ func migrateClickHouseLogDB() error {
+ 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
+ 		return err
+ 	}
++	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS tc_request_id Nullable(String)").Error; err != nil {
++		return err
++	}
++	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS tc_request_id_state String DEFAULT 'missing'").Error; err != nil {
++		return err
++	}
+ 	return syncClickHouseLogTTL(ttlDays)
+ }
+ 
+@@ -448,6 +454,8 @@ CREATE TABLE IF NOT EXISTS logs (
+ 	ip String DEFAULT '',
+ 	request_id String DEFAULT '',
+ 	upstream_request_id String DEFAULT '',
++	tc_request_id Nullable(String),
++	tc_request_id_state String DEFAULT 'missing',
+ 	other String DEFAULT ''
+ )
+ ENGINE = MergeTree()
