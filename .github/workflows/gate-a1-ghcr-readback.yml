@@ -1,0 +1,52 @@
+name: Gate A1 GHCR private candidate readback
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  readback:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE_REPOSITORY: ghcr.io/hoooh578/tokencraft-new-api
+      IMAGE: ghcr.io/hoooh578/tokencraft-new-api:gate-a1-7c442156-source-offer-1
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.1.7
+        with:
+          persist-credentials: false
+      - name: Authenticate for read-only registry access
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Read and verify immutable OCI identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "$IMAGE" > "$RUNNER_TEMP/index.json"
+          index_sha="sha256:$(sha256sum "$RUNNER_TEMP/index.json" | awk '{print $1}')"
+          test "$(jq -r .mediaType "$RUNNER_TEMP/index.json")" = application/vnd.oci.image.index.v1+json
+          test "$(jq '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length' "$RUNNER_TEMP/index.json")" = 1
+          amd64=$(jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' "$RUNNER_TEMP/index.json")
+          test "$(jq '[.manifests[] | select(.platform.os == "unknown" and .platform.architecture == "unknown" and .annotations["vnd.docker.reference.type"] == "attestation-manifest" and .annotations["vnd.docker.reference.digest"] == $amd64)] | length' --arg amd64 "$amd64" "$RUNNER_TEMP/index.json")" = 1
+          attestation=$(jq -r '.manifests[] | select(.platform.os == "unknown" and .platform.architecture == "unknown" and .annotations["vnd.docker.reference.type"] == "attestation-manifest" and .annotations["vnd.docker.reference.digest"] == $amd64) | .digest' --arg amd64 "$amd64" "$RUNNER_TEMP/index.json")
+          test -n "$attestation" && test "$attestation" != null
+          docker buildx imagetools inspect --raw "${IMAGE%@*}@$attestation" > "$RUNNER_TEMP/attestation.json"
+          test "sha256:$(sha256sum "$RUNNER_TEMP/attestation.json" | awk '{print $1}')" = "$attestation"
+          test "$(jq -r .mediaType "$RUNNER_TEMP/attestation.json")" = application/vnd.oci.image.manifest.v1+json
+          docker buildx imagetools inspect --raw "${IMAGE%@*}@$amd64" > "$RUNNER_TEMP/amd64.json"
+          test "sha256:$(sha256sum "$RUNNER_TEMP/amd64.json" | awk '{print $1}')" = "$amd64"
+          config=$(jq -r .config.digest "$RUNNER_TEMP/amd64.json")
+          test "$(jq -r .mediaType "$RUNNER_TEMP/amd64.json")" = application/vnd.oci.image.manifest.v1+json
+          test "$config" != null && [[ "$config" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker pull "${IMAGE%@*}@$amd64"
+          labels=$(docker image inspect "${IMAGE%@*}@$amd64" --format '{{json .Config.Labels}}')
+          test "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" = https://github.com/hoooh578/tokencraft-new-api
+          test "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" = 2826f046c29966cebb78bc7b98403de10b9f5214
+          test "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" = gate-a1-7c442156-source-offer-1
+          test "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" = AGPL-3.0-only
+          jq -n --arg image "$IMAGE" --arg index "$index_sha" --arg digestRef "$IMAGE_REPOSITORY@$index_sha" --arg amd64 "$amd64" --arg config "$config" --arg attestation "$attestation" --argjson labels "$labels" '{version:1,image:$image,imageByDigest:$digestRef,ociIndexDigest:$index,linuxAmd64ManifestDigest:$amd64,configDigest:$config,attestationManifestDigest:$attestation,labels:$labels}' > "$RUNNER_TEMP/readback.json"
+          receipt_sha=$(sha256sum "$RUNNER_TEMP/readback.json" | awk '{print $1}')
+          echo "### Gate A1 private candidate readback" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$receipt_sha\`" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/readback.json" >> "$GITHUB_STEP_SUMMARY"
