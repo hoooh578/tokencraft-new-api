@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "supersedes": "private-candidate-record.json",
+  "status": "public-candidate-not-deployed",
+  "migrationRun": false,
+  "anonymousReadback": { "utc": "2026-08-17T09:13:00Z", "result": "pass" },
+  "tokenCraft": { "pr": 298, "mergeCommit": "7c442156fb2a1527b12bcd6d628372d5ea6aeb81" },
+  "sourceOffer": { "tag": "tokencraft-gate-a1-0ff659be-source-offer-1", "tagObject": "56668a00d9b50d7eb4d04481a44e26ef240c4f35", "commit": "2826f046c29966cebb78bc7b98403de10b9f5214", "archiveSha256": "086cee2310cb6b72d06107768af2af7d58f7d8e60e1b789a990056fa74bb041c" },
+  "verifier": { "publicCommit": "56419c21b841f0195873084b05ac2c32c4ec41a5", "scriptSha256": "19018f3b543ec98de073f70a787e3544b13a5cbaeeabc47068fe44b3750a0e0e", "lockSha256": "7e1a6095962f1c250233ec26182e106a91edaacc1cad493d91bcd210ea199d14", "canonicalPatchSha256": "958def972aa44d997ea71f133270247c0cd8620b33ba9d68827dfcd674a779a2", "receiptSha256": "fa6272a278eb2c320d01b3ea75fe8368633636ad171bfe973c7cc195fd7577df" },
+  "workflows": { "buildRun": 32012539460, "authenticatedReadbackRun": 32013361893 },
+  "image": { "digestRef": "ghcr.io/hoooh578/tokencraft-new-api@sha256:88f32ab805459a6d4802da64c759b40b15bb3f5ed17e117f68edcd8af6751f13", "ociIndexDigest": "sha256:88f32ab805459a6d4802da64c759b40b15bb3f5ed17e117f68edcd8af6751f13", "linuxAmd64ManifestDigest": "sha256:3343f9c5364041235ded407143e0eb31dd10fb1257336c2eae3b6659779984a9", "configDigest": "sha256:78d33695adb3c982035d7eac5cf048e93f056eb28ce20e0134d8dd2d7947ba39", "attestationManifestDigest": "sha256:a1d84e22b6522bb75215f76228a0a89f6cb4e7a4e22faff623208b9b2e06a4ea", "platform": "linux/amd64", "labelsVerifiedByRun": 32013361893 }
+}
