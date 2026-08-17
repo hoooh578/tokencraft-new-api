@@ -1,0 +1,135 @@
+name: Gate A1 GHCR private candidate
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: gate-a1-ghcr-private-candidate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-private-candidate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE_REF: ghcr.io/hoooh578/tokencraft-new-api:gate-a1-7c442156-source-offer-1
+      SOURCE_REPOSITORY: https://github.com/hoooh578/tokencraft-new-api
+      SOURCE_TAG: tokencraft-gate-a1-0ff659be-source-offer-1
+      SOURCE_TAG_OBJECT: 56668a00d9b50d7eb4d04481a44e26ef240c4f35
+      SOURCE_COMMIT: 2826f046c29966cebb78bc7b98403de10b9f5214
+      UPSTREAM_REPOSITORY: https://github.com/QuantumNous/new-api
+      UPSTREAM_COMMIT: becc18e3007e9812a7bb2dcfebefc6c19ad3f102
+      SOURCE_ARCHIVE_SHA256: 086cee2310cb6b72d06107768af2af7d58f7d8e60e1b789a990056fa74bb041c
+      VERIFIER_SHA256: 19018f3b543ec98de073f70a787e3544b13a5cbaeeabc47068fe44b3750a0e0e
+      EXPECTED_RECEIPT_SHA256: fa6272a278eb2c320d01b3ea75fe8368633636ad171bfe973c7cc195fd7577df
+      OUTPUT_TAG: gate-a1-7c442156-source-offer-1
+    steps:
+      - name: Check out immutable workflow revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.1.7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reject an existing candidate tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set +e
+          gh api --paginate "/users/hoooh578/packages/container/tokencraft-new-api/versions?per_page=100" > "$RUNNER_TEMP/package-versions.json" 2> "$RUNNER_TEMP/package-versions.err"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::package already exists; do not risk package-level public disclosure"
+            exit 1
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/package-versions.err"; then
+            : # The package has not been created yet, so the fixed tag is absent.
+          else
+            cat "$RUNNER_TEMP/package-versions.err"
+            exit "$status"
+          fi
+
+      - name: Verify fixed public source offer
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/gate-a1-source"
+          mkdir -p "$work"
+          git clone --quiet "$SOURCE_REPOSITORY" "$work/public-source"
+          git -C "$work/public-source" fetch --quiet origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          test "$(git -C "$work/public-source" rev-parse "refs/tags/$SOURCE_TAG")" = "$SOURCE_TAG_OBJECT"
+          git -C "$work/public-source" checkout --quiet "$SOURCE_COMMIT"
+          git clone --quiet "$UPSTREAM_REPOSITORY" "$work/upstream"
+          git -C "$work/upstream" checkout --quiet "$UPSTREAM_COMMIT"
+          curl --fail --location --silent --show-error --retry 2 --output "$work/source-offer.tar.gz" "https://github.com/hoooh578/tokencraft-new-api/archive/refs/tags/$SOURCE_TAG.tar.gz"
+          test "$(sha256sum "$work/source-offer.tar.gz" | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256"
+          test "$(sha256sum provenance/gate-a1/v2/scripts/verify-new-api-source-offer.mjs | awk '{print $1}')" = "$VERIFIER_SHA256"
+          node provenance/gate-a1/v2/scripts/verify-new-api-source-offer.mjs \
+            --source-dir "$work/public-source" \
+            --archive "$work/source-offer.tar.gz" \
+            --upstream-dir "$work/upstream" \
+            --receipt "$work/source-offer-receipt.json"
+          receipt_sha=$(sha256sum "$work/source-offer-receipt.json" | awk '{print $1}')
+          test "$receipt_sha" = "$EXPECTED_RECEIPT_SHA256"
+          cmp --silent "$work/source-offer-receipt.json" provenance/gate-a1/v2/SOURCE-OFFER-RECEIPT.json
+          echo "SOURCE_DIR=$work/public-source" >> "$GITHUB_ENV"
+          echo "RECEIPT_SHA256=$receipt_sha" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR with the repository token
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push the fixed linux amd64 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --push --provenance=mode=min --sbom=false \
+            --tag "$IMAGE_REF" \
+            --label org.opencontainers.image.source=https://github.com/hoooh578/tokencraft-new-api \
+            --label org.opencontainers.image.revision=2826f046c29966cebb78bc7b98403de10b9f5214 \
+            --label org.opencontainers.image.version=gate-a1-7c442156-source-offer-1 \
+            --label org.opencontainers.image.licenses=AGPL-3.0-only \
+            "$SOURCE_DIR"
+
+      - name: Read back and classify OCI identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          index_digest=$(docker buildx imagetools inspect --format '{{.Digest}}' "$IMAGE_REF")
+          docker buildx imagetools inspect --raw "$IMAGE_REF" > "$RUNNER_TEMP/index-or-manifest.json"
+          media_type=$(jq -r '.mediaType // empty' "$RUNNER_TEMP/index-or-manifest.json")
+          test "$media_type" = 'application/vnd.oci.image.index.v1+json' || test "$media_type" = 'application/vnd.docker.distribution.manifest.list.v2+json'
+          test "$(jq '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length' "$RUNNER_TEMP/index-or-manifest.json")" = 1
+          amd64_manifest=$(jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' "$RUNNER_TEMP/index-or-manifest.json")
+          test -n "$amd64_manifest" && test "$amd64_manifest" != null
+          docker buildx imagetools inspect --raw "${IMAGE_REF%@*}@$amd64_manifest" > "$RUNNER_TEMP/amd64-manifest.json"
+          child_media_type=$(jq -r '.mediaType // empty' "$RUNNER_TEMP/amd64-manifest.json")
+          test "$child_media_type" = 'application/vnd.oci.image.manifest.v1+json' || test "$child_media_type" = 'application/vnd.docker.distribution.manifest.v2+json'
+          config_digest=$(jq -r '.config.digest' "$RUNNER_TEMP/amd64-manifest.json")
+          test -n "$config_digest" && test "$config_digest" != null
+          docker pull "${IMAGE_REF%@*}@$amd64_manifest"
+          labels=$(docker image inspect "${IMAGE_REF%@*}@$amd64_manifest" --format '{{json .Config.Labels}}')
+          test "$(jq -r '."org.opencontainers.image.source"' <<<"$labels")" = 'https://github.com/hoooh578/tokencraft-new-api'
+          test "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" = '2826f046c29966cebb78bc7b98403de10b9f5214'
+          test "$(jq -r '."org.opencontainers.image.version"' <<<"$labels")" = 'gate-a1-7c442156-source-offer-1'
+          test "$(jq -r '."org.opencontainers.image.licenses"' <<<"$labels")" = 'AGPL-3.0-only'
+          {
+            echo '### Gate A1 private GHCR candidate'
+            echo
+            echo "- source tag object: \`$SOURCE_TAG_OBJECT\`"
+            echo "- source commit: \`$SOURCE_COMMIT\`"
+            echo "- verifier receipt SHA-256: \`$RECEIPT_SHA256\`"
+            echo "- OCI index digest: \`$index_digest\`"
+            echo "- linux/amd64 manifest digest: \`$amd64_manifest\`"
+            echo "- config digest: \`$config_digest\`"
+            echo "- image: \`${IMAGE_REF%@*}@$index_digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
